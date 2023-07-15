@@ -10,7 +10,26 @@ import (
 	"strings"
 )
 
+// getUpstreamTag returns the upstream tag and the path to the file
+// Example: /gd:123/abc -> gd:123, /abc
+// Example: /abc/def -> "", /abc/def
+func getUpstreamTag(path string) (string, string) {
+	upstreamTag := strings.TrimPrefix(path, "/")
+	filePath := "/"
+	nextSlash := strings.Index(upstreamTag, "/")
+	if nextSlash != -1 {
+		upstreamTag = upstreamTag[:nextSlash]
+		filePath = path[nextSlash+1:]
+	}
+	if !strings.Contains(upstreamTag, ":") {
+		return "", path
+	}
+	return upstreamTag, filePath
+}
+
 func main() {
+	overrides := GetUpstreamOverrides()
+
 	listenAddress := os.Getenv("LISTEN_ADDRESS")
 	gd := NewGoogleDrive(GoogleDriveConfig{
 		RefreshToken:  os.Getenv("GD_REFRESH_TOKEN"),
@@ -28,27 +47,80 @@ func main() {
 		log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
 
 		u, _ := url.Parse(r.URL.String())
-		path := u.Path
 
-		defaultRootId := gd.Config.DefaultRootID
-		if strings.HasPrefix(path, "/gd:") {
-			parts := strings.Split(path, "/")
-			defaultRootId = parts[1][3:]
-			path = "/" + strings.Join(parts[2:], "/")
+		// Parse the upstream tag and the path
+		upstreamTag, path := getUpstreamTag(u.Path)
+		if upstreamTag == "" {
+			upstreamTag = fmt.Sprintf("gd:%s", gd.Config.DefaultRootID)
 		}
 
-		fileName := path[strings.LastIndex(path, "/")+1:]
-
+		// Disallow directory listing
 		if strings.HasSuffix(path, "/") {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
+		defaultRootId := gd.Config.DefaultRootID
+		if strings.HasPrefix(upstreamTag, "gd:") {
+			defaultRootId = upstreamTag[3:]
+		}
+
+		fileName := path[strings.LastIndex(path, "/")+1:]
+
+		var fileResponse *http.Response
+		var err error
+		httpClient := &http.Client{}
+
+		// Check first if the file is available from the upstream
+		if override, ok := overrides[upstreamTag]; ok {
+			upstreamUrl := override.UpstreamUrl + path
+			upstreamResponse, err := httpClient.Head(upstreamUrl)
+			if err == nil && upstreamResponse.StatusCode == http.StatusOK {
+				log.Printf("Using upstream override URL %s\n", upstreamUrl)
+
+				// Check whether to redirect or proxy (Sec-Fetch-Site header)
+				if override.MustProxy || r.Header.Get("Sec-Fetch-Mode") == "cors" {
+					// Cross-site request, proxy
+					u, err := url.Parse(upstreamUrl)
+					if err != nil {
+						log.Printf("Error parsing upstream URL %s: %s\n", upstreamUrl, err.Error())
+						http.Error(w, "Not found", http.StatusNotFound)
+						return
+					}
+
+					req := &http.Request{
+						Method: http.MethodGet,
+						URL:    u,
+					}
+
+					if r.Header.Get("Range") != "" {
+						req.Header = make(http.Header)
+						req.Header.Set("Range", r.Header.Get("Range"))
+					}
+
+					fileResponse, err = httpClient.Do(req)
+					if err != nil {
+						log.Printf("Error fetching upstream URL %s: %s\n", upstreamUrl, err.Error())
+						http.Error(w, "Not found", http.StatusNotFound)
+						return
+					}
+				} else {
+					// Not a cross-site request, redirect
+					http.Redirect(w, r, upstreamUrl, http.StatusFound)
+					return
+				}
+			} else {
+				log.Printf("Upstream override URL returned %d: %s\n", upstreamResponse.StatusCode, upstreamUrl)
+			}
+		}
+
 		// Fetch file
-		fileResponse, err := gd.DownloadByPath(path, r.Header.Get("Range"), defaultRootId)
-		if err != nil || fileResponse == nil {
-			http.Error(w, "Not found", http.StatusNotFound)
-			return
+		if fileResponse == nil {
+			fileResponse, err = gd.DownloadByPath(path, r.Header.Get("Range"), defaultRootId)
+			if err != nil || fileResponse == nil {
+				http.Error(w, "Not found", http.StatusNotFound)
+				return
+			}
 		}
 		defer fileResponse.Body.Close()
 

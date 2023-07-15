@@ -18,7 +18,7 @@ GD_REFRESH_TOKEN=
 
 ```sh
 # Build the project
-go build
+go build -tags=nooverride
 
 # Move the binary
 install -m 0755 content-server-go /usr/local/bin/content-server-go
