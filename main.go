@@ -10,23 +10,6 @@ import (
 	"strings"
 )
 
-// getUpstreamTag returns the upstream tag and the path to the file
-// Example: /gd:123/abc -> gd:123, /abc
-// Example: /abc/def -> "", /abc/def
-func getUpstreamTag(path string) (string, string) {
-	upstreamTag := strings.TrimPrefix(path, "/")
-	filePath := "/"
-	nextSlash := strings.Index(upstreamTag, "/")
-	if nextSlash != -1 {
-		upstreamTag = upstreamTag[:nextSlash]
-		filePath = path[nextSlash+1:]
-	}
-	if !strings.Contains(upstreamTag, ":") {
-		return "", path
-	}
-	return upstreamTag, filePath
-}
-
 func main() {
 	overrides := GetUpstreamOverrides()
 
@@ -38,18 +21,25 @@ func main() {
 		ClientSecret:  os.Getenv("GD_CLIENT_SECRET"),
 	}, false)
 
+	metrics := NewMetrics()
+
 	http.HandleFunc("/_health", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
 		fmt.Fprint(w, "ok")
 	})
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
+		metrics.ServeHTTP(w, r)
+	})
+
+	http.HandleFunc("/", metrics.WithMetrics(func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
 
 		u, _ := url.Parse(r.URL.String())
 
 		// Parse the upstream tag and the path
-		upstreamTag, path := getUpstreamTag(u.Path)
+		upstreamTag, path := GetUpstreamTag(u.Path)
 		if upstreamTag == "" {
 			upstreamTag = fmt.Sprintf("gd:%s", gd.Config.DefaultRootID)
 		}
@@ -151,7 +141,7 @@ func main() {
 
 		// Write response to client
 		io.Copy(w, fileResponse.Body)
-	})
+	}))
 
 	log.Println("HTTP webserver running. Access it at", listenAddress)
 	log.Fatal(http.ListenAndServe(listenAddress, nil))
