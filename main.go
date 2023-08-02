@@ -64,43 +64,38 @@ func main() {
 		// Check first if the file is available from the upstream
 		if override, ok := overrides[upstreamTag]; ok {
 			upstreamUrl := override.UpstreamUrl + path
-			upstreamResponse, err := httpClient.Head(upstreamUrl)
-			if err == nil && upstreamResponse.StatusCode == http.StatusOK {
-				log.Printf("Using upstream override URL %s\n", upstreamUrl)
+			log.Printf("Using upstream override URL %s\n", upstreamUrl)
 
-				// Check whether to redirect or proxy (Sec-Fetch-Site header)
-				if override.MustProxy || r.Header.Get("Sec-Fetch-Mode") == "cors" {
-					// Cross-site request, proxy
-					u, err := url.Parse(upstreamUrl)
-					if err != nil {
-						log.Printf("Error parsing upstream URL %s: %s\n", upstreamUrl, err.Error())
-						http.Error(w, "Not found", http.StatusNotFound)
-						return
-					}
+			// Check whether to redirect or proxy (Sec-Fetch-Site header)
+			if override.MustProxy || r.Header.Get("Sec-Fetch-Mode") == "cors" {
+				// Cross-site request, proxy
+				u, err := url.Parse(upstreamUrl)
+				if err != nil {
+					log.Printf("Error parsing upstream URL %s: %s\n", upstreamUrl, err.Error())
+					http.Error(w, "Not found", http.StatusNotFound)
+					return
+				}
 
-					req := &http.Request{
-						Method: http.MethodGet,
-						URL:    u,
-					}
+				req := &http.Request{
+					Method: http.MethodGet,
+					URL:    u,
+				}
 
-					if r.Header.Get("Range") != "" {
-						req.Header = make(http.Header)
-						req.Header.Set("Range", r.Header.Get("Range"))
-					}
+				if r.Header.Get("Range") != "" {
+					req.Header = make(http.Header)
+					req.Header.Set("Range", r.Header.Get("Range"))
+				}
 
-					fileResponse, err = httpClient.Do(req)
-					if err != nil {
-						log.Printf("Error fetching upstream URL %s: %s\n", upstreamUrl, err.Error())
-						http.Error(w, "Not found", http.StatusNotFound)
-						return
-					}
-				} else {
-					// Not a cross-site request, redirect
-					http.Redirect(w, r, upstreamUrl, http.StatusFound)
+				fileResponse, err = httpClient.Do(req)
+				if err != nil {
+					log.Printf("Error fetching upstream URL %s: %s\n", upstreamUrl, err.Error())
+					http.Error(w, "Not found", http.StatusNotFound)
 					return
 				}
 			} else {
-				log.Printf("Upstream override URL returned %d: %s\n", upstreamResponse.StatusCode, upstreamUrl)
+				// Not a cross-site request, redirect
+				http.Redirect(w, r, upstreamUrl, http.StatusFound)
+				return
 			}
 		}
 
