@@ -1,0 +1,3 @@
+UPSTREAM TAG	UPSTREAM URL	MUST PROXY
+gd:exampleFolderId	https://cdn.example.com/archive	false
+s3:example-bucket	https://s3.example.com/example-bucket	true
