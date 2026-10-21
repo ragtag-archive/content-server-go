@@ -5,10 +5,14 @@ import (
 	"io"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
+
+var passHeaders []string = []string{"Accept", "Range", "Referrer", "User-Agent"}
 
 func main() {
 	overrides := GetUpstreamOverrides()
@@ -23,6 +27,10 @@ func main() {
 
 	metrics := NewMetrics()
 
+	http.DefaultTransport.(*http.Transport).MaxIdleConns = 100
+	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 100
+	httpClient := &http.Client{}
+
 	http.HandleFunc("/_health", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
 		fmt.Fprint(w, "ok")
@@ -34,6 +42,8 @@ func main() {
 	})
 
 	http.HandleFunc("/", metrics.WithMetrics(func(w http.ResponseWriter, r *http.Request) {
+		var tStart, tBeginProxy, tEndProxy time.Time
+		tStart = time.Now()
 		log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
 
 		u, _ := url.Parse(r.URL.String())
@@ -59,15 +69,14 @@ func main() {
 
 		var fileResponse *http.Response
 		var err error
-		httpClient := &http.Client{}
 
 		// Check first if the file is available from the upstream
 		if override, ok := overrides[upstreamTag]; ok {
 			upstreamUrl := override.UpstreamUrl + path
-			log.Printf("Using upstream override URL %s\n", upstreamUrl)
+			log.Printf("Using upstream override URL %s, proxy: %v\n", upstreamUrl, override.MustProxy)
 
 			// Check whether to redirect or proxy (Sec-Fetch-Site header)
-			if override.MustProxy || r.Header.Get("Sec-Fetch-Mode") == "cors" {
+			if override.MustProxy { //|| r.Header.Get("Sec-Fetch-Mode") == "cors" {
 				// Cross-site request, proxy
 				u, err := url.Parse(upstreamUrl)
 				if err != nil {
@@ -81,19 +90,27 @@ func main() {
 					URL:    u,
 				}
 
-				if r.Header.Get("Range") != "" {
-					req.Header = make(http.Header)
-					req.Header.Set("Range", r.Header.Get("Range"))
+				req.Header = make(http.Header)
+				for _, header := range passHeaders {
+					v := r.Header.Get(header)
+					if v != "" {
+						req.Header.Set(header, v)
+					}
 				}
 
+				tBeginProxy = time.Now()
 				fileResponse, err = httpClient.Do(req)
 				if err != nil {
 					log.Printf("Error fetching upstream URL %s: %s\n", upstreamUrl, err.Error())
 					http.Error(w, "Not found", http.StatusNotFound)
 					return
 				}
+				tEndProxy = time.Now()
 			} else {
 				// Not a cross-site request, redirect
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Range")
 				http.Redirect(w, r, upstreamUrl, http.StatusFound)
 				return
 			}
@@ -101,13 +118,13 @@ func main() {
 
 		// Fetch file
 		if fileResponse == nil {
+			log.Printf("Fetching file %s from Google Drive\n", path)
 			fileResponse, err = gd.DownloadByPath(path, r.Header.Get("Range"), defaultRootId)
 			if err != nil || fileResponse == nil {
 				http.Error(w, "Not found", http.StatusNotFound)
 				return
 			}
 		}
-		defer fileResponse.Body.Close()
 
 		// Modify headers
 		fileResponse.Header.Del("X-GUploader-UploadID")
@@ -131,10 +148,17 @@ func main() {
 			w.Header().Set(k, v[0])
 		}
 
+		// Write performance metrics to client
+		dTotal := time.Since(tStart)
+		dProxy := tEndProxy.Sub(tBeginProxy)
+		w.Header().Set("X-Content-Server-Go-Total", fmt.Sprintf("%d", dTotal.Milliseconds()))
+		w.Header().Set("X-Content-Server-Go-Proxy", fmt.Sprintf("%d", dProxy.Milliseconds()))
+
 		// Write status code to client
 		w.WriteHeader(fileResponse.StatusCode)
 
 		// Write response to client
+		defer fileResponse.Body.Close()
 		io.Copy(w, fileResponse.Body)
 	}))
 

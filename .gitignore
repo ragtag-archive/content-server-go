@@ -2,3 +2,4 @@
 .env
 content-server-go
 overrides.tsv
+upload.sh
